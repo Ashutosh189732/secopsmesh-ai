@@ -1,0 +1,432 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { explainIncident, fetchIncident, reportUrl } from "../../../lib/api";
+import { severityClasses, statusClasses, priorityClasses } from "../../../lib/badges";
+
+const POLL_MS = 5000;
+const TABS = ["Timeline", "Evidence", "Policies", "Root Cause", "Risk", "Remediation"];
+
+export default function IncidentDetailPage({ params }) {
+  const { id } = params;
+  const [incident, setIncident] = useState(null);
+  const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState("Timeline");
+  const [approved, setApproved] = useState({});
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const data = await fetchIncident(id);
+        if (!cancelled) {
+          setIncident(data);
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      }
+    }
+
+    load();
+    const interval = setInterval(load, POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [id]);
+
+  if (error) {
+    return (
+      <div className="rounded border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
+        Could not load incident #{id}: {error}
+      </div>
+    );
+  }
+
+  if (!incident) {
+    return <div className="text-sm text-gray-500">Loading incident #{id}...</div>;
+  }
+
+  return (
+    <div>
+      <Link href="/" className="text-sm text-blue-700 hover:underline">
+        &larr; Back to incidents
+      </Link>
+
+      <div className="mt-3 flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900">
+            {incident.resource_name}{" "}
+            <span className="text-sm font-normal text-gray-400">#{incident.id}</span>
+          </h2>
+          <div className="mt-1 flex gap-2">
+            <span
+              className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${severityClasses(
+                incident.severity
+              )}`}
+            >
+              {incident.severity}
+            </span>
+            <span
+              className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${statusClasses(
+                incident.status
+              )}`}
+            >
+              {incident.status}
+            </span>
+          </div>
+        </div>
+        <a
+          href={reportUrl(incident.id)}
+          className="rounded bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
+        >
+          Download Report
+        </a>
+      </div>
+
+      {/* FP Gate decision, shown prominently per the plan */}
+      <FpGateCard incident={incident} />
+
+      <div className="mt-6 border-b border-gray-200">
+        <nav className="-mb-px flex gap-6">
+          {TABS.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`border-b-2 px-1 py-2 text-sm font-medium ${
+                activeTab === tab
+                  ? "border-gray-900 text-gray-900"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      <div className="mt-6">
+        {activeTab === "Timeline" && <TimelineTab incident={incident} />}
+        {activeTab === "Evidence" && <EvidenceTab incident={incident} />}
+        {activeTab === "Policies" && <PoliciesTab incident={incident} />}
+        {activeTab === "Root Cause" && <RootCauseTab incident={incident} />}
+        {activeTab === "Risk" && <RiskTab incident={incident} />}
+        {activeTab === "Remediation" && (
+          <RemediationTab incident={incident} approved={approved} setApproved={setApproved} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FpGateCard({ incident }) {
+  const [explaining, setExplaining] = useState(false);
+  const [explainError, setExplainError] = useState(null);
+  const [llmText, setLlmText] = useState(null);
+
+  // Prefer the freshly returned text; fall back to the persisted cache the
+  // incident poll delivers.
+  const aiExplanation = llmText ?? incident.llm_explanation;
+
+  async function handleExplain() {
+    setExplaining(true);
+    setExplainError(null);
+    try {
+      const result = await explainIncident(incident.id);
+      setLlmText(result.explanation);
+    } catch (err) {
+      setExplainError(err.message);
+    } finally {
+      setExplaining(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded border border-gray-200 bg-white px-4 py-3">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold text-gray-700">False-Positive Gate</div>
+        <div className="text-sm text-gray-600">
+          Score: <span className="font-mono font-semibold">{incident.fp_score ?? "—"}</span>
+        </div>
+      </div>
+
+      {/* Deterministic explanation — generated by the gate itself, zero LLM cost */}
+      {incident.fp_explanation && (
+        <p className="mt-2 text-sm leading-relaxed text-gray-700">{incident.fp_explanation}</p>
+      )}
+
+      {/* Exact arithmetic, demoted to fine print for auditability */}
+      {incident.fp_decision_reason && (
+        <div className="mt-2 font-mono text-[11px] text-gray-400">{incident.fp_decision_reason}</div>
+      )}
+
+      <div className="mt-3 border-t border-gray-100 pt-3">
+        {aiExplanation ? (
+          <div>
+            <div className="mb-1 flex items-center gap-2 text-xs font-medium text-violet-700">
+              <span>✨ AI explanation</span>
+              <span className="font-normal text-gray-400">generated on demand by the LLM</span>
+            </div>
+            <p className="text-sm leading-relaxed text-gray-700">{aiExplanation}</p>
+          </div>
+        ) : (
+          <button
+            onClick={handleExplain}
+            disabled={explaining}
+            className="rounded border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+          >
+            {explaining ? "Asking the model…" : "✨ Explain with AI"}
+          </button>
+        )}
+        {explainError && (
+          <div className="mt-2 text-xs text-red-600">Could not generate explanation: {explainError}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return (
+    <div className="rounded border border-dashed border-gray-300 bg-white px-6 py-10 text-center text-sm text-gray-500">
+      {text}
+    </div>
+  );
+}
+
+function TimelineTab({ incident }) {
+  if (!incident.timeline?.length) return <EmptyState text="No timeline events yet." />;
+  return (
+    <ol className="space-y-3">
+      {incident.timeline.map((event, i) => (
+        <li key={i} className="rounded border border-gray-200 bg-white px-4 py-3">
+          <div className="text-xs text-gray-400">{event.timestamp}</div>
+          <div className="text-sm font-medium text-gray-800">{event.signal}</div>
+          <div className="text-xs text-gray-500">source: {event.source}</div>
+          {event.details && Object.keys(event.details).length > 0 && (
+            <div className="mt-1 text-xs text-gray-500">
+              {Object.entries(event.details).map(([k, v]) => (
+                <span key={k} className="mr-3 whitespace-nowrap">
+                  <span className="text-gray-400">{k}:</span> {String(v)}
+                </span>
+              ))}
+            </div>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ConfidenceBar({ value }) {
+  const pct = Math.round((value || 0) * 100);
+  const color = pct >= 85 ? "bg-green-500" : pct >= 60 ? "bg-yellow-500" : "bg-red-500";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-2 w-24 overflow-hidden rounded-full bg-gray-200">
+        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="font-mono text-xs text-gray-600">{value?.toFixed?.(2) ?? value}</span>
+    </div>
+  );
+}
+
+function EvidenceTab({ incident }) {
+  if (!incident.evidence?.length) return <EmptyState text="No evidence collected yet." />;
+  return (
+    <div className="overflow-hidden rounded border border-gray-200 bg-white">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th className="px-4 py-2">ID</th>
+            <th className="px-4 py-2">Connector</th>
+            <th className="px-4 py-2">Confidence</th>
+            <th className="px-4 py-2">Data preview</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {incident.evidence.map((item) => (
+            <tr key={item.id}>
+              <td className="px-4 py-3 font-mono text-xs text-gray-500">{item.id}</td>
+              <td className="px-4 py-3 font-medium text-gray-800">{item.connector}</td>
+              <td className="px-4 py-3">
+                <ConfidenceBar value={item.confidence} />
+              </td>
+              <td className="px-4 py-3 font-mono text-xs text-gray-500">
+                {Object.entries(item.data || {})
+                  .slice(0, 3)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(", ")}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {incident.evidence_guard_triggered && (
+        <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+          The 90-second investigation guard was triggered — evidence collection was cut short.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PoliciesTab({ incident }) {
+  if (!incident.policies?.length) return <EmptyState text="No policy matches retrieved yet." />;
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      {incident.policies.map((policy) => (
+        <div key={policy.policy_id} className="rounded border border-gray-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div className="font-medium text-gray-900">{policy.title}</div>
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-mono text-gray-600">
+              {policy.relevance_score?.toFixed?.(2)}
+            </span>
+          </div>
+          <p className="mt-2 whitespace-pre-line text-xs text-gray-500">{policy.excerpt}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RootCauseTab({ incident }) {
+  const rc = incident.root_cause;
+  if (!rc) return <EmptyState text="Root cause analysis not yet available." />;
+  const cited = new Set(rc.evidence_ids_cited || []);
+  return (
+    <div className="space-y-4">
+      <div className="rounded border border-gray-200 bg-white p-4">
+        <p className="text-sm text-gray-800">{rc.root_cause}</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="rounded-full bg-gray-100 px-2 py-0.5 font-mono text-gray-600">
+            confidence {rc.confidence?.toFixed?.(2)}
+          </span>
+          {rc.gdpr_flag && (
+            <span className="rounded-full bg-red-100 px-2 py-0.5 font-medium text-red-800">
+              GDPR flagged
+            </span>
+          )}
+          {(incident.evidence || []).map((item) => (
+            <span
+              key={item.id}
+              className={`rounded-full border px-2 py-0.5 font-mono ${
+                cited.has(item.id)
+                  ? "border-blue-400 bg-blue-100 text-blue-800"
+                  : "border-gray-200 bg-gray-50 text-gray-400"
+              }`}
+              title={cited.has(item.id) ? "cited" : "not cited"}
+            >
+              {item.id}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {rc.alternative_hypotheses?.length > 0 && (
+        <div className="rounded border border-gray-200 bg-white p-4">
+          <div className="mb-2 text-sm font-semibold text-gray-700">Alternative hypotheses</div>
+          <ul className="list-disc space-y-2 pl-5 text-sm text-gray-600">
+            {rc.alternative_hypotheses.map((alt, i) => (
+              <li key={i}>{alt}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RiskTab({ incident }) {
+  const ra = incident.risk_assessment;
+  if (!ra) return <EmptyState text="Risk assessment not yet available." />;
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={`inline-block rounded-full border px-3 py-1 text-sm font-semibold ${severityClasses(
+            ra.severity
+          )}`}
+        >
+          {ra.severity} — {ra.score}/100
+        </span>
+        {ra.gdpr_flag && (
+          <span className="rounded-full bg-red-100 px-3 py-1 text-sm font-medium text-red-800">
+            GDPR flagged
+          </span>
+        )}
+        <span className="text-xs text-gray-500">{ra.affected_estimate}</span>
+      </div>
+      <div className="rounded border border-gray-200 bg-white p-4">
+        <div className="text-sm font-semibold text-gray-700">Business impact</div>
+        <p className="mt-1 text-sm text-gray-600">{ra.business_impact}</p>
+      </div>
+      <div className="rounded border border-gray-200 bg-white p-4">
+        <div className="text-sm font-semibold text-gray-700">Compliance impact</div>
+        <p className="mt-1 text-sm text-gray-600">{ra.compliance_impact}</p>
+      </div>
+    </div>
+  );
+}
+
+function RemediationTab({ incident, approved, setApproved }) {
+  const plan = incident.remediation_plan;
+  if (!plan?.steps?.length) return <EmptyState text="No remediation plan generated yet." />;
+  return (
+    <div>
+      <div className="mb-4 rounded border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-800">
+        No action here executes anything. "Mark Approved" only updates this screen — it is not
+        wired to any backend action.
+      </div>
+      <div className="space-y-3">
+        {plan.steps.map((step) => {
+          const isApproved = approved[step.step_number];
+          return (
+            <div key={step.step_number} className="rounded border border-gray-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-gray-900">
+                    Step {step.step_number}: {step.action}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                      owner: {step.owner}
+                    </span>
+                    <span
+                      className={`rounded-full border px-2 py-0.5 ${priorityClasses(step.priority)}`}
+                    >
+                      {step.priority} priority
+                    </span>
+                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                      {step.estimated_time}
+                    </span>
+                    {step.requires_human_approval && (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">
+                        requires human approval
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() =>
+                    setApproved((prev) => ({ ...prev, [step.step_number]: !prev[step.step_number] }))
+                  }
+                  className={`shrink-0 rounded px-3 py-1.5 text-xs font-medium ${
+                    isApproved
+                      ? "bg-green-600 text-white"
+                      : "border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                >
+                  {isApproved ? "Approved ✓" : "Mark Approved"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

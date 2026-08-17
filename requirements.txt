@@ -1,0 +1,25 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+sqlalchemy>=2.0
+pydantic>=2.9
+python-dotenv>=1.0
+
+# LLM access (Day 3+ agents) — OpenRouter speaks the OpenAI-compatible chat
+# completions API, so the `openai` SDK is pointed at OpenRouter's base_url
+# rather than openai.com. No `anthropic` package needed since we never call
+# Anthropic's API directly.
+openai>=1.50
+
+# Day 3 — LangGraph orchestrator + langchain-openai give us stateful
+# cycles/conditional edges and a chat-model wrapper we can still point at
+# OpenRouter's base_url (not openai.com or Anthropic directly).
+langgraph>=0.2
+langchain-openai>=0.2
+
+# Day 4 — Policy Agent RAG. No package needed: ChromaDB's native core
+# segfaults on this VM (CPU-feature gap in the hypervisor), so retrieval is
+# a pure-Python hashed-vector + cosine-similarity scan instead. See
+# app/policy_agent.py for the full explanation.
+
+# Day 6 — pure-Python PDF generation for the incident report endpoint.
+reportlab>=4.0

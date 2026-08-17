@@ -1,0 +1,29 @@
+{
+  "name": "03_investigating_gdpr",
+  "description": "Flagship scenario: a storage bucket goes public, then a large upload lands in it, then a suspicious API call fires from the same environment. Three signals correlate into one incident that exercises the full pipeline and is likely to trip the Root Cause Agent's gdpr_flag.",
+  "expected_outcome": "correlates to correlated_count=3, severity escalates to critical, score = 40 (critical) + 40 (3 types) + 20 (azure_monitor) + 10 (public-read bucket anomaly) = 110 -> investigating (signal 1 alone = 80 queued, signal 2 = 95 investigating)",
+  "delay_seconds_between_signals": 2,
+  "signals": [
+    {
+      "signal_type": "PublicStorageBucket",
+      "resource_name": "prod-analytics-exports",
+      "severity": "critical",
+      "source": "azure_monitor",
+      "details": {"bucket_acl": "public-read"}
+    },
+    {
+      "signal_type": "LargeDataUpload",
+      "resource_name": "prod-analytics-exports",
+      "severity": "high",
+      "source": "azure_monitor",
+      "details": {"size_gb": 4.2, "file_name": "customer_export.csv"}
+    },
+    {
+      "signal_type": "UnauthorizedAPICall",
+      "resource_name": "prod-analytics-exports",
+      "severity": "medium",
+      "source": "iam_logs",
+      "details": {"caller": "svc-deploy-bot", "api": "azure.openai.completions"}
+    }
+  ]
+}

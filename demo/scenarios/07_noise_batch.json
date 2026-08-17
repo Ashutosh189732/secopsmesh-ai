@@ -1,0 +1,29 @@
+{
+  "name": "07_noise_batch",
+  "description": "Three independent low-signal alerts on three different resources - none share a resource_name, so none correlate with each other. Demonstrates that the incident list shows three distinct parked incidents rather than one merged incident, contrasting with scenarios 3-6 where same-resource signals fold together.",
+  "expected_outcome": "all three score below 40 and land as separate parked incidents: 23, 33 (public-read bucket anomaly), and 33.",
+  "delay_seconds_between_signals": 1,
+  "signals": [
+    {
+      "signal_type": "UnauthorizedAPICall",
+      "resource_name": "test-vm-042",
+      "severity": "low",
+      "source": "vuln_scanner",
+      "details": {"caller": "unknown", "api": "ssh.login.attempt"}
+    },
+    {
+      "signal_type": "PublicStorageBucket",
+      "resource_name": "staging-api-01",
+      "severity": "low",
+      "source": "waf_alert",
+      "details": {"bucket_acl": "public-read", "note": "known staging bucket, expected public"}
+    },
+    {
+      "signal_type": "LargeDataUpload",
+      "resource_name": "qa-cluster-7",
+      "severity": "medium",
+      "source": "endpoint_agent",
+      "details": {"size_gb": 0.2, "file_name": "test_fixture.csv"}
+    }
+  ]
+}

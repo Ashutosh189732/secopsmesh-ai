@@ -1,0 +1,22 @@
+{
+  "name": "04_investigating_access_control",
+  "description": "Second full-pipeline scenario, on a different resource so it runs independently of scenario 3. Demonstrates the FP gate re-scoring an existing incident as a more-trusted source correlates in, and the Policy Agent surfacing an access-control angle (SOC2 CC6 / ISO 27001 A.9) rather than GDPR.",
+  "expected_outcome": "signal 1 alone: 40 (critical) + 10 (1 type) + 14 (iam_logs) + 15 (47-vs-2 call-volume anomaly, capped) = 79 -> queued. After signal 2 correlates (2 types, best source azure_monitor): 40 + 25 + 20 + 15 = 100 -> investigating.",
+  "delay_seconds_between_signals": 2,
+  "signals": [
+    {
+      "signal_type": "UnauthorizedAPICall",
+      "resource_name": "internal-ml-gateway",
+      "severity": "critical",
+      "source": "iam_logs",
+      "details": {"caller": "svc-deploy-bot", "api": "azure.openai.completions", "call_count_last_hour": 47, "baseline_call_count_last_hour": 2}
+    },
+    {
+      "signal_type": "LargeDataUpload",
+      "resource_name": "internal-ml-gateway",
+      "severity": "high",
+      "source": "azure_monitor",
+      "details": {"size_gb": 1.1, "file_name": "model_eval_batch.csv"}
+    }
+  ]
+}

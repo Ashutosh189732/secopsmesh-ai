@@ -1,0 +1,22 @@
+{
+  "name": "05_severity_escalation",
+  "description": "A medium-severity signal starts out merely queued. A second, more severe signal correlates in on the same resource and escalates the whole incident's severity to the worst signal seen (per app/correlation.py's _more_severe) - not just its score. Good for showing that escalation is a distinct mechanic from correlated_count alone (contrast with scenario 4, where severity never changes).",
+  "expected_outcome": "signal 1 alone: 15 (medium) + 10 (1 type) + 18 (kubernetes) + 0 (0.6GB upload below 1GB anomaly floor) = 43 -> queued. After signal 2 correlates (severity escalates medium -> critical, 2 types, best source azure_monitor, public-read bucket anomaly): 40 + 25 + 20 + 10 = 95 -> investigating.",
+  "delay_seconds_between_signals": 2,
+  "signals": [
+    {
+      "signal_type": "LargeDataUpload",
+      "resource_name": "checkout-service-prod",
+      "severity": "medium",
+      "source": "kubernetes",
+      "details": {"size_gb": 0.6, "file_name": "session_cache_dump.csv"}
+    },
+    {
+      "signal_type": "PublicStorageBucket",
+      "resource_name": "checkout-service-prod",
+      "severity": "critical",
+      "source": "azure_monitor",
+      "details": {"bucket_acl": "public-read"}
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "06_kubernetes_anchored",
+  "description": "A LargeDataUpload-anchored incident, primary source kubernetes rather than azure_monitor. Exercises the orchestrator's connector order for LargeDataUpload (azure_monitor, kubernetes, iam_logs, github_commits) - a different sequence than the storage-bucket scenarios. Reminder: the mocked connectors (app/orchestrator/connectors.py) return fixed storage/CDN-flavored evidence text regardless of scenario, so narrate the FP-gate scoring and connector selection here, not the Evidence tab's literal content.",
+  "expected_outcome": "signal 1 alone: 30 (high) + 10 (1 type) + 18 (kubernetes) + 5 (8.7GB upload anomaly) = 63 -> queued. After signal 2 correlates (severity escalates high -> critical, 2 types): 40 + 25 + 18 + 5 = 88 -> investigating.",
+  "delay_seconds_between_signals": 2,
+  "signals": [
+    {
+      "signal_type": "LargeDataUpload",
+      "resource_name": "ml-training-cluster",
+      "severity": "high",
+      "source": "kubernetes",
+      "details": {"size_gb": 8.7, "file_name": "training_batch_042.parquet"}
+    },
+    {
+      "signal_type": "UnauthorizedAPICall",
+      "resource_name": "ml-training-cluster",
+      "severity": "critical",
+      "source": "iam_logs",
+      "details": {"caller": "svc-ml-pipeline", "api": "azure.storage.blob.download"}
+    }
+  ]
+}
