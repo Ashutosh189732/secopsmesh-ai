@@ -10,8 +10,10 @@ import json
 import logging
 import threading
 
+from sqlalchemy import select
+
 from app.database import SessionLocal
-from app.event_queue import pop
+from app.event_queue import pop, push
 from app.models import Incident
 from app.orchestrator.graph import run_investigation
 from app.policy_agent import retrieve_policies
@@ -118,6 +120,38 @@ def _mark_failed(incident_id: int) -> None:
         db.rollback()
     finally:
         db.close()
+
+
+def requeue_inflight() -> None:
+    """Recover incidents orphaned mid-investigation by a process restart.
+
+    The event queue is in-memory and the worker is an in-process thread, so a
+    crash — or, far more commonly in dev, a `uvicorn --reload` restart caused
+    by saving any watched file — kills both mid-run. An incident left in
+    `investigating` (queued but never picked up) or `analyzing` (picked up but
+    never finished) would otherwise sit in that state forever, because only the
+    now-dead worker ever moves it forward. Called once at startup, before the
+    worker begins consuming. The worker's analyzed_at_count dedupe makes a
+    re-queue of an actually-completed incident a no-op.
+    """
+    db = SessionLocal()
+    try:
+        stuck_ids = (
+            db.execute(
+                select(Incident.id).where(Incident.status.in_(("investigating", "analyzing")))
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        db.close()
+
+    for incident_id in stuck_ids:
+        logger.info(
+            "orchestrator worker: re-queuing incident %s left in-flight by a previous process",
+            incident_id,
+        )
+        push("signals", {"incident_id": incident_id})
 
 
 def run_forever(stop_event: threading.Event) -> None:

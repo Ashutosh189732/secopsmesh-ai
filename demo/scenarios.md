@@ -190,12 +190,45 @@ evidence correlates in, not just at creation time.
 
 ---
 
+## Scenario 8 — Presenter-paced escalation (queued → investigating, on your cue)
+
+A two-act version of the re-scoring story, built for live narration: the
+runner fires signal 1, then **blocks until you press Enter** — so the incident
+sits visibly in `queued` for as long as you want to talk about it — and only
+then fires signal 2, which escalates it to `investigating` while the audience
+watches the badge flip and the pipeline tabs fill in.
+
+```bash
+python demo/run_scenario.py 08_presenter_paced_escalation
+```
+
+**Act 1** — a backup service account starts enumerating Key Vault secrets at
+~10x its baseline rate:
+`30 (high) + 10 (1 type) + 14 (iam_logs) + 10 (31-vs-3 call-volume anomaly) =
+64 → queued`. While it sits there: hover the FP score in the incident list for
+the plain-English explanation, open the incident and show the gate card, click
+**Explain with AI** for the on-demand LLM paraphrase — all while the incident
+is deliberately *not* being investigated.
+
+**Act 2** — press Enter; the same resource's storage bucket goes public:
+severity escalates high → critical, 2 distinct types, best source becomes
+`azure_monitor`, public-read anomaly:
+`40 + 25 + 20 + 10 = 95 → investigating`, and the full LLM pipeline kicks off
+live.
+
+> Fire signal 2 within 10 minutes of signal 1 — the correlation window is
+> anchored to the incident's creation time, so a longer pause creates a second,
+> separate incident instead of escalating the first.
+
+---
+
 ## Suggested walkthrough order
 
 1. **Scenario 1** — "here's noise, the gate stops it, zero LLM cost."
 2. **Scenario 2** — "here's a real signal that's not enough on its own yet."
 3. **Scenario 3** — full walkthrough of all 6 tabs, PDF report download.
-4. **Scenario 4** (time permitting) — same pipeline, different policy angle,
+4. **Scenario 8** — presenter-paced queued → investigating escalation on your cue.
+5. **Scenario 4** (time permitting) — same pipeline, different policy angle,
    demonstrates re-scoring on correlation rather than a single-shot decision.
 
 Between POSTing Scenario 3 or 4's signals and checking the dashboard, leave

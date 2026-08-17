@@ -13,6 +13,9 @@ from app.routers import health, incidents, signals
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Re-queue incidents a previous process (crash or --reload restart) left
+    # mid-investigation — the in-memory queue and worker thread die with it.
+    worker.requeue_inflight()
     stop_event = threading.Event()
     worker.start(stop_event)
     yield

@@ -231,6 +231,7 @@ EXPECTED_FINAL_STATUS = {
     "05_severity_escalation": "investigating",
     "06_kubernetes_anchored": "investigating",
     "07_noise_batch": "parked",  # three independent incidents, all parked
+    "08_presenter_paced_escalation": "investigating",
 }
 
 
