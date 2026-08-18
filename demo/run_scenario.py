@@ -38,11 +38,29 @@ def post_signal(api_base: str, payload: dict) -> dict:
         ) from exc
 
 
+def _pause_for_enter(next_signal: dict) -> None:
+    """Presenter-paced scenarios: block until Enter before firing the next
+    signal, so the audience can sit on the current dashboard state as long as
+    needed. Falls back to a short fixed delay when stdin isn't interactive
+    (e.g. running under 'all' in CI or a pipe)."""
+    prompt = (
+        f"\n  [paused] Next up: {next_signal['signal_type']} "
+        f"(severity={next_signal['severity']}, source={next_signal['source']}). "
+        f"Press Enter to fire it..."
+    )
+    try:
+        input(prompt)
+    except EOFError:
+        print("\n  (stdin not interactive - continuing after 3s)")
+        time.sleep(3)
+
+
 def run_scenario(path: Path, api_base: str) -> None:
     scenario = json.loads(path.read_text(encoding="utf-8"))
     name = scenario.get("name", path.stem)
     signals = scenario["signals"]
     delay = scenario.get("delay_seconds_between_signals", 0)
+    wait_for_enter = scenario.get("wait_for_enter_between_signals", False)
 
     print(f"\n=== {name} ===")
     if scenario.get("description"):
@@ -59,8 +77,11 @@ def run_scenario(path: Path, api_base: str) -> None:
         print(f"      -> incident #{incident['id']}: status={incident['status']}, "
               f"fp_score={incident['fp_score']}, correlated_count={incident['correlated_count']}")
         print(f"      -> {incident['fp_decision_reason']}")
-        if i < len(signals) and delay:
-            time.sleep(delay)
+        if i < len(signals):
+            if wait_for_enter:
+                _pause_for_enter(signals[i])
+            elif delay:
+                time.sleep(delay)
 
     print(f"\n{name} done. Watch http://localhost:3000 for the incident to populate.")
 
@@ -98,8 +119,14 @@ def main() -> None:
         candidate = SCENARIOS_DIR / candidate.name
 
     if not candidate.exists():
-        available = ", ".join(p.stem for p in sorted(SCENARIOS_DIR.glob("*.json")))
-        sys.exit(f"Scenario not found: {candidate}\nAvailable: {available}")
+        # Allow a bare prefix ("08", "03_invest") to resolve to its full name,
+        # matching the run_scenario.sh wrapper's behavior.
+        matches = sorted(SCENARIOS_DIR.glob(f"{args.scenario}*.json"))
+        if len(matches) == 1:
+            candidate = matches[0]
+        else:
+            available = ", ".join(p.stem for p in sorted(SCENARIOS_DIR.glob("*.json")))
+            sys.exit(f"Scenario not found: {candidate}\nAvailable: {available}")
 
     run_scenario(candidate, args.api_base)
 

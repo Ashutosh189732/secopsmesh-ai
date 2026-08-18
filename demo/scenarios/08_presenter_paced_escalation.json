@@ -1,0 +1,23 @@
+{
+  "name": "08_presenter_paced_escalation",
+  "description": "Presenter-paced two-act escalation. Act 1: a backup service account starts enumerating Key Vault secrets at ~10x its baseline rate - queued, and a good moment to hover the FP score for the plain-English explanation and click 'Explain with AI'. The runner then WAITS for Enter. Act 2 (when you say go): the same resource's storage bucket goes public - severity escalates high -> critical and the incident flips to investigating, kicking off the full LLM pipeline live on the dashboard.",
+  "expected_outcome": "signal 1 alone: 30 (high) + 10 (1 type) + 14 (iam_logs) + 10 (31-vs-3 call-volume anomaly) = 64 -> queued. After Enter, signal 2 correlates: severity escalates to critical, 2 types, best source azure_monitor, public-read anomaly: 40 + 25 + 20 + 10 = 95 -> investigating.",
+  "wait_for_enter_between_signals": true,
+  "delay_seconds_between_signals": 0,
+  "signals": [
+    {
+      "signal_type": "UnauthorizedAPICall",
+      "resource_name": "payments-vault-prod",
+      "severity": "high",
+      "source": "iam_logs",
+      "details": {"caller": "svc-backup", "api": "azure.keyvault.secrets.list", "call_count_last_hour": 31, "baseline_call_count_last_hour": 3}
+    },
+    {
+      "signal_type": "PublicStorageBucket",
+      "resource_name": "payments-vault-prod",
+      "severity": "critical",
+      "source": "azure_monitor",
+      "details": {"bucket_acl": "public-read"}
+    }
+  ]
+}
