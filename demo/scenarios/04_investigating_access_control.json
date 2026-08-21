@@ -9,14 +9,32 @@
       "resource_name": "internal-ml-gateway",
       "severity": "critical",
       "source": "iam_logs",
-      "details": {"caller": "svc-deploy-bot", "api": "azure.openai.completions", "call_count_last_hour": 47, "baseline_call_count_last_hour": 2}
+      "details": {"caller": "svc-deploy-bot", "api": "azure.openai.completions", "call_count_last_hour": 47, "baseline_call_count_last_hour": 2},
+      "actor": {
+        "type": "service",
+        "id": "svc-deploy-bot",
+        "ip_address": "10.0.8.33"
+      },
+      "action": "execute",
+      "outcome": "success",
+      "event_time": "2026-08-18T13:10:00Z",
+      "summary": "Deployment bot svc-deploy-bot invoked OpenAI API 47 times in one hour — 23× above baseline of 2 calls, indicating compromised credentials or unauthorized access to ML gateway."
     },
     {
       "signal_type": "LargeDataUpload",
       "resource_name": "internal-ml-gateway",
       "severity": "high",
       "source": "azure_monitor",
-      "details": {"size_gb": 1.1, "file_name": "model_eval_batch.csv"}
+      "details": {"size_gb": 1.1, "file_name": "model_eval_batch.csv"},
+      "actor": {
+        "type": "service",
+        "id": "svc-ml-trainer",
+        "ip_address": "10.0.8.45"
+      },
+      "action": "create",
+      "outcome": "success",
+      "event_time": "2026-08-18T13:12:15Z",
+      "summary": "ML training service svc-ml-trainer uploaded 1.1GB evaluation batch to gateway — correlates with spike in API calls, possible model extraction or data exfiltration attempt."
     }
   ]
 }

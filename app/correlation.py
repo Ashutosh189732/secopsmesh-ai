@@ -58,6 +58,13 @@ def merge_signal(incident: Incident, signal: SignalIn, ts: datetime) -> None:
             # signal's details survive on the incident, so the downstream
             # Root Cause / Policy agents never see the later signals' payloads.
             "details": signal.details,
+            # NEW: Store actor/action/outcome in timeline
+            "actor": signal.actor.model_dump() if signal.actor else None,
+            "action": signal.action.value,
+            "outcome": signal.outcome.value if signal.outcome else None,
+            "event_time": signal.event_time.isoformat() if signal.event_time else None,
+            # AI-generated summary (from demo scenarios) or None
+            "summary": signal.details.get("summary") if isinstance(signal.details, dict) else None,
         },
     ]
     incident.correlated_count += 1
@@ -79,6 +86,13 @@ def new_incident(signal: SignalIn, ts: datetime) -> Incident:
                 "timestamp": ts.isoformat(),
                 "source": signal.source,
                 "details": signal.details,
+                # NEW: Include actor/action/outcome in first timeline entry
+                "actor": signal.actor.model_dump() if signal.actor else None,
+                "action": signal.action.value,
+                "outcome": signal.outcome.value if signal.outcome else None,
+                "event_time": signal.event_time.isoformat() if signal.event_time else None,
+                # AI-generated summary (from demo scenarios) or None
+                "summary": signal.details.get("summary") if isinstance(signal.details, dict) else None,
             }
         ],
         correlated_count=1,

@@ -3,8 +3,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import event_queue
 from app.database import get_db
-from app.models import Incident
+from app.models import Incident, utcnow
 from app.report import build_report
 from app.schemas import IncidentOut
 
@@ -142,3 +143,34 @@ def get_incident_report(incident_id: int, db: Session = Depends(get_db)):
             "Content-Disposition": f'attachment; filename="incident-{incident_id}-report.pdf"'
         },
     )
+
+
+@router.post("/api/incidents/{incident_id}/investigate", response_model=IncidentOut)
+def trigger_investigation(incident_id: int, db: Session = Depends(get_db)):
+    """Manually escalate a gated incident to investigating status.
+
+    Allows operators to override the FP gate and trigger investigation for
+    parked/queued incidents. The incident is pushed to the event queue exactly
+    as if it had auto-escalated. Returns 409 if already investigating/analyzing/
+    analyzed/failed.
+    """
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    if incident.status not in ("parked", "queued"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot trigger investigation: incident is already {incident.status}",
+        )
+
+    # State transition
+    incident.status = "investigating"
+    incident.manually_triggered_at = utcnow()
+    db.commit()
+
+    # Push to queue (same as auto-escalation in signals.py:53)
+    event_queue.push("signals", {"incident_id": incident.id})
+
+    db.refresh(incident)
+    return incident

@@ -9,14 +9,32 @@
       "resource_name": "checkout-service-prod",
       "severity": "medium",
       "source": "kubernetes",
-      "details": {"size_gb": 0.6, "file_name": "session_cache_dump.csv"}
+      "details": {"size_gb": 0.6, "file_name": "session_cache_dump.csv"},
+      "actor": {
+        "type": "system",
+        "id": "k8s-pod-checkout-worker-7",
+        "ip_address": "10.244.0.89"
+      },
+      "action": "create",
+      "outcome": "success",
+      "event_time": "2026-08-18T14:05:20Z",
+      "summary": "Kubernetes pod checkout-worker-7 created 600MB session cache dump to storage — below anomaly threshold, routine cache persistence operation."
     },
     {
       "signal_type": "PublicStorageBucket",
       "resource_name": "checkout-service-prod",
       "severity": "critical",
       "source": "azure_monitor",
-      "details": {"bucket_acl": "public-read"}
+      "details": {"bucket_acl": "public-read"},
+      "actor": {
+        "type": "user",
+        "id": "devops-admin@company.com",
+        "ip_address": "203.0.113.88"
+      },
+      "action": "update",
+      "outcome": "success",
+      "event_time": "2026-08-18T14:07:45Z",
+      "summary": "DevOps admin devops-admin@company.com exposed checkout service storage to public internet — session cache now publicly accessible, critical PII exposure escalation."
     }
   ]
 }

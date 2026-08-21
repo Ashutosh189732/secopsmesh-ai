@@ -22,13 +22,54 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
 
+class ActorType(str, Enum):
+    """WHO triggered this signal - aligns with OCSF actor.type"""
+    USER = "user"
+    SERVICE = "service"
+    SYSTEM = "system"
+    ANONYMOUS = "anonymous"
+    OTHER = "other"
+
+
+class Actor(BaseModel):
+    """Actor entity - who performed the action"""
+    type: ActorType = ActorType.OTHER
+    id: str | None = None  # username, service account name, session ID
+    ip_address: str | None = None
+
+
+class Action(str, Enum):
+    """WHAT action was performed - aligns with OCSF activity_id"""
+    CREATE = "create"
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+    EXECUTE = "execute"
+    ACCESS = "access"
+    OTHER = "other"
+
+
+class Outcome(str, Enum):
+    """Result of the action - aligns with ECS event.outcome"""
+    SUCCESS = "success"
+    FAILURE = "failure"
+    BLOCKED = "blocked"
+    PARTIAL = "partial"
+
+
 class SignalIn(BaseModel):
     signal_type: str = Field(..., min_length=1)
     resource_name: str = Field(..., min_length=1)
     severity: Severity
     source: str = Field(..., min_length=1)
-    timestamp: datetime | None = None
+    timestamp: datetime | None = None  # ingestion time
     details: dict = Field(default_factory=dict)
+
+    # NEW: Actor/action/outcome/event_time
+    actor: Actor | None = None
+    action: Action = Action.OTHER
+    outcome: Outcome | None = None
+    event_time: datetime | None = None  # when event actually occurred (vs timestamp = when we received it)
 
 
 class IncidentOut(BaseModel):
@@ -56,5 +97,6 @@ class IncidentOut(BaseModel):
     risk_assessment: dict | None
     remediation_plan: dict | None
     analyzed_at_count: int | None
+    manually_triggered_at: datetime | None
     created_at: datetime
     updated_at: datetime

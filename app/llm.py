@@ -1,15 +1,19 @@
 """Shared LLM access point.
 
 All agents (Orchestrator, Root Cause, Risk, Remediation — Day 3+) call the
-model through OpenRouter's OpenAI-compatible API rather than Anthropic
-directly, using one client and one configured model string.
+model through either OpenRouter's OpenAI-compatible API or Azure OpenAI Service,
+depending on the LLM_PROVIDER environment variable.
+
+Supported providers:
+- openrouter (default): OpenRouter API with any model
+- azure: Azure OpenAI Service with Azure AD or API key authentication
 """
 
 import json
 import re
 from functools import lru_cache
 
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 
 from app.config import settings
 
@@ -51,7 +55,28 @@ def extract_json(raw: str) -> dict:
 
 
 @lru_cache
-def get_client() -> OpenAI:
+def get_client() -> OpenAI | AzureOpenAI:
+    """Get the configured LLM client based on LLM_PROVIDER setting.
+
+    Returns:
+        OpenAI client for OpenRouter or AzureOpenAI client for Azure.
+
+    Raises:
+        RuntimeError: If required configuration is missing for the selected provider.
+    """
+    if settings.llm_provider == "azure":
+        return _get_azure_client()
+    elif settings.llm_provider == "openrouter":
+        return _get_openrouter_client()
+    else:
+        raise RuntimeError(
+            f"Unknown LLM_PROVIDER: {settings.llm_provider}. "
+            "Valid options: 'openrouter', 'azure'"
+        )
+
+
+def _get_openrouter_client() -> OpenAI:
+    """Create OpenRouter client (original implementation)."""
     if not settings.openrouter_api_key:
         raise RuntimeError(
             "OPENROUTER_API_KEY is not set. Get one at https://openrouter.ai/keys "
@@ -63,8 +88,91 @@ def get_client() -> OpenAI:
     )
 
 
+def _get_azure_client() -> AzureOpenAI:
+    """Create Azure OpenAI client with Azure AD or API key authentication.
+
+    Authentication priority:
+    1. Azure AD with system environment credentials (AZURE_CLIENT_ID/SECRET/TENANT_ID)
+    2. Azure AD with DefaultAzureCredential (managed identity, az login, etc.)
+    3. API key (AZURE_OPENAI_API_KEY) - fallback for development
+
+    Endpoint can be specified as:
+    - AZURE_OPENAI_RESOURCE_NAME (preferred) - will construct endpoint URL
+    - AZURE_OPENAI_ENDPOINT (full URL) - for direct control
+    """
+    # Construct endpoint from resource name or use provided endpoint
+    endpoint = settings.azure_openai_endpoint
+    if not endpoint and settings.azure_openai_resource_name:
+        endpoint = f"https://{settings.azure_openai_resource_name}.openai.azure.com/"
+
+    if not endpoint:
+        raise RuntimeError(
+            "Azure OpenAI endpoint not configured. Set either:\n"
+            "  AZURE_OPENAI_RESOURCE_NAME=your-resource-name  (preferred)\n"
+            "  OR AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/"
+        )
+
+    if not settings.azure_openai_deployment_name:
+        raise RuntimeError(
+            "AZURE_OPENAI_DEPLOYMENT_NAME is not set. Set it to your deployed model name in .env"
+        )
+
+    # Try API key auth first if explicitly provided (simplest path)
+    if settings.azure_openai_api_key:
+        return AzureOpenAI(
+            api_key=settings.azure_openai_api_key,
+            api_version=settings.azure_openai_api_version,
+            azure_endpoint=endpoint,
+        )
+
+    # Use Azure AD authentication (requires azure-identity package)
+    try:
+        from azure.identity import ClientSecretCredential, DefaultAzureCredential, get_bearer_token_provider
+    except ImportError as exc:
+        raise RuntimeError(
+            "Azure AD authentication requires 'azure-identity' package. "
+            "Install it with: pip install azure-identity"
+        ) from exc
+
+    # Try explicit service principal credentials from environment first
+    # (AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID)
+    if settings.azure_client_id and settings.azure_client_secret and settings.azure_tenant_id:
+        credential = ClientSecretCredential(
+            tenant_id=settings.azure_tenant_id,
+            client_id=settings.azure_client_id,
+            client_secret=settings.azure_client_secret,
+        )
+    else:
+        # Fall back to DefaultAzureCredential
+        # (tries managed identity, az login, environment variables, etc.)
+        credential = DefaultAzureCredential()
+
+    # Create token provider for Azure Cognitive Services scope
+    token_provider = get_bearer_token_provider(
+        credential,
+        settings.azure_cognitive_services_scope
+    )
+
+    return AzureOpenAI(
+        azure_ad_token_provider=token_provider,
+        api_version=settings.azure_openai_api_version,
+        azure_endpoint=endpoint,
+    )
+
+
 def get_model() -> str:
-    return settings.openrouter_model
+    """Get the model name/deployment to use for LLM calls.
+
+    Returns:
+        - For OpenRouter: full model path (e.g., "anthropic/claude-sonnet-5")
+        - For Azure: deployment name (e.g., "gpt-4-deployment")
+    """
+    if settings.llm_provider == "azure":
+        if not settings.azure_openai_deployment_name:
+            raise RuntimeError("AZURE_OPENAI_DEPLOYMENT_NAME is not set")
+        return settings.azure_openai_deployment_name
+    else:
+        return settings.openrouter_model
 
 
 # --- Prompt-injection hardening -------------------------------------------

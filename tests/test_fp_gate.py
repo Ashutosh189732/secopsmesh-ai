@@ -26,7 +26,15 @@ def make_incident(signals: list[dict]) -> Incident:
     rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     worst = max(signals, key=lambda s: rank.get(s["severity"], 0))["severity"]
     timeline = [
-        {"signal": s["signal_type"], "source": s["source"], "details": s.get("details", {})}
+        {
+            "signal": s["signal_type"],
+            "source": s["source"],
+            "details": s.get("details", {}),
+            # NEW: Include actor/action/outcome in timeline if present
+            "actor": s.get("actor"),
+            "action": s.get("action", "other"),
+            "outcome": s.get("outcome"),
+        }
         for s in signals
     ]
     first = signals[0]
@@ -50,7 +58,7 @@ def test_low_unknown_source_parks():
     )
     score, reason = fp_gate.score_incident(inc)
     assert score == 5 + 10 + 8 + 0 == 23
-    assert "-> parked" in reason
+    assert "parked" in reason  # Unicode arrow (→) makes exact match fragile
 
 
 def test_diversity_rewards_distinct_types_not_repetition():
@@ -134,27 +142,26 @@ def test_unrecognized_severity_treated_as_medium():
     inc = make_incident(
         [{"signal_type": "X", "resource_name": "r", "severity": "catastrophic", "source": "iam_logs"}]
     )
-    pts, unrecognized, capped = fp_gate._severity_points(inc)
+    pts, unrecognized = fp_gate._severity_points(inc)
     assert pts == fp_gate.SEVERITY_POINTS["medium"] == 15
     assert unrecognized is True
 
 
-def test_untrusted_source_cannot_self_declare_critical():
-    inc = make_incident(
+def test_all_sources_trusted_for_severity():
+    """All configured sources are trusted to report severity accurately."""
+    # Even sources not in SOURCE_RELIABILITY_POINTS get full severity credit
+    inc_unknown = make_incident(
         [{"signal_type": "X", "resource_name": "r", "severity": "critical", "source": "some_random_agent"}]
     )
-    pts, _, capped = fp_gate._severity_points(inc)
-    assert pts == fp_gate.UNTRUSTED_SEVERITY_CAP == 20
-    assert capped is True
+    pts_unknown, _ = fp_gate._severity_points(inc_unknown)
+    assert pts_unknown == 40  # No capping
 
-
-def test_trusted_source_not_capped():
-    inc = make_incident(
+    # Known sources also get full severity credit
+    inc_known = make_incident(
         [{"signal_type": "X", "resource_name": "r", "severity": "critical", "source": "iam_logs"}]
     )
-    pts, _, capped = fp_gate._severity_points(inc)
-    assert pts == 40
-    assert capped is False
+    pts_known, _ = fp_gate._severity_points(inc_known)
+    assert pts_known == 40
 
 
 # --- Natural-language explanation builder ------------------------------------
@@ -166,7 +173,7 @@ def test_explanation_parked_mentions_noise_and_unrecognized_source():
     )
     text = fp_gate.build_explanation(inc)
     assert "parked as likely noise" in text
-    assert "'endpoint_agent' is not in the recognized source list" in text
+    assert "'endpoint_agent' is not in the high-reliability source list" in text
     assert "no LLM cost" in text
 
 
@@ -180,12 +187,16 @@ def test_explanation_queued_mentions_missing_baseline():
     assert "no baseline to compare against" in text
 
 
-def test_explanation_untrusted_critical_mentions_cap():
+def test_explanation_all_sources_get_full_severity_credit():
+    """Even sources not in high-reliability list get full severity credit (no capping)."""
     inc = make_incident(
         [{"signal_type": "X", "resource_name": "r", "severity": "critical", "source": "random_tool"}]
     )
     text = fp_gate.build_explanation(inc)
-    assert "cannot self-declare critical" in text
+    # Should mention critical severity contributed 40 pts (not capped)
+    assert "Severity 'critical' contributed 40 pts" in text
+    # Should mention the source is not in high-reliability list
+    assert "not in the high-reliability source list" in text
 
 
 def test_explanation_investigating_names_fired_anomaly_rules():
@@ -201,6 +212,39 @@ def test_explanation_investigating_names_fired_anomaly_rules():
     assert "investigation pipeline" in text
     assert "public-read" in text
     assert "2 distinct signal types" in text
+
+
+def test_explanation_for_analyzed_incident_shows_detailed_breakdown():
+    """Analyzed incidents should still show the detailed FP gate breakdown
+    for audit trail purposes, not a generic 'it passed' message."""
+    inc = make_incident(
+        [
+            {"signal_type": "PublicStorageBucket", "resource_name": "r", "severity": "critical",
+             "source": "azure_monitor", "details": {"bucket_acl": "public-read"}},
+            {"signal_type": "LargeDataUpload", "resource_name": "r", "severity": "high",
+             "source": "azure_monitor", "details": {"size_gb": 4.2}},
+        ]
+    )
+    fp_gate.apply(inc)
+    assert inc.status == "investigating"
+
+    # Simulate the orchestrator moving the incident to analyzing
+    inc.status = "analyzing"
+    text = fp_gate.build_explanation(inc)
+    # Should show detailed breakdown, not generic summary
+    assert "investigation pipeline" in text
+    assert "Severity 'critical' contributed" in text
+    assert "distinct signal types" in text
+    # Should NOT contain the generic message anymore
+    assert "full investigation results appear below" not in text
+
+    # Same for analyzed status
+    inc.status = "analyzed"
+    text = fp_gate.build_explanation(inc)
+    assert "investigation pipeline" in text
+    assert "Severity 'critical' contributed" in text
+    assert "distinct signal types" in text
+    assert "full investigation results appear below" not in text
 
 
 def test_explanation_matches_apply_decision_for_all_scenarios():
@@ -258,3 +302,138 @@ def test_scenario_final_status_unchanged(path):
     inc = make_incident(signals)
     fp_gate.apply(inc)
     assert inc.status == expected, inc.fp_decision_reason
+
+
+# --- Actor/Action/Outcome scoring tests (Phase 1 enhancements) ---------------
+
+
+def test_actor_trust_system_highest():
+    """System actors get highest trust score (10 points)."""
+    inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "low",
+                "source": "iam_logs",
+                "details": {},
+                "actor": {"type": "system", "id": "kernel-process"},
+                "action": "execute",
+                "outcome": "success",
+            }
+        ]
+    )
+    assert fp_gate._actor_trust_points(inc) == 10
+
+
+def test_actor_trust_anonymous_lowest():
+    """Anonymous actors get lowest trust (2 points)."""
+    inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "low",
+                "source": "iam_logs",
+                "details": {},
+                "actor": {"type": "anonymous", "id": None},
+                "action": "read",
+                "outcome": "success",
+            }
+        ]
+    )
+    assert fp_gate._actor_trust_points(inc) == 2
+
+
+def test_outcome_blocked_reduces_score():
+    """Blocked outcome reduces score by -10 points."""
+    blocked_inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "critical",
+                "source": "azure_monitor",
+                "details": {},
+                "actor": {"type": "user", "id": "test@test.com"},
+                "action": "delete",
+                "outcome": "blocked",
+            }
+        ]
+    )
+
+    success_inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "critical",
+                "source": "azure_monitor",
+                "details": {},
+                "actor": {"type": "user", "id": "test@test.com"},
+                "action": "delete",
+                "outcome": "success",
+            }
+        ]
+    )
+
+    blocked_score = fp_gate.score_incident(blocked_inc)[0]
+    success_score = fp_gate.score_incident(success_inc)[0]
+    assert blocked_score < success_score
+
+
+def test_action_delete_multiplier_boosts_score():
+    """Delete action applies 1.2x risk multiplier."""
+    delete_inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "high",
+                "source": "iam_logs",
+                "details": {},
+                "actor": {"type": "user", "id": "test@test.com"},
+                "action": "delete",
+                "outcome": "success",
+            }
+        ]
+    )
+
+    read_inc = make_incident(
+        [
+            {
+                "signal_type": "UnauthorizedAPICall",
+                "resource_name": "test-resource",
+                "severity": "high",
+                "source": "iam_logs",
+                "details": {},
+                "actor": {"type": "user", "id": "test@test.com"},
+                "action": "read",
+                "outcome": "success",
+            }
+        ]
+    )
+
+    assert fp_gate.score_incident(delete_inc)[0] > fp_gate.score_incident(read_inc)[0]
+
+
+def test_backward_compat_missing_actor_fields():
+    """Old signals without actor/action/outcome still score correctly."""
+    # Old format: no actor/action/outcome
+    inc = make_incident(
+        [
+            {
+                "signal_type": "PublicStorageBucket",
+                "resource_name": "test-resource",
+                "severity": "critical",
+                "source": "azure_monitor",
+                "details": {"bucket_acl": "public-read"},
+            }
+        ]
+    )
+
+    score, reason = fp_gate.score_incident(inc)
+    # Score should be: 40 (sev) + 10 (div=1) + 20 (source) + 10 (anomaly) + 0 (actor) + 0 (outcome) * 1.0 (action) = 80
+    assert score == 80
+    assert "actor_trust(0)" in reason
+    assert "outcome_adj(0)" in reason

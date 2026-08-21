@@ -31,15 +31,71 @@ RUN_TIMEOUT_SECONDS = 90
 MAX_ITERATIONS = 5
 MAX_EVIDENCE_ITEMS = 3
 
-PLANNER_SYSTEM = (
-    "You are the evidence-gathering planner for a SOC incident investigation. "
-    "Given an incident and the evidence already collected, decide whether more "
-    "evidence is needed and, if so, which single connector to query next from "
-    "the remaining list. Two or three well-chosen items are normally enough to "
-    "explain root cause and impact - don't over-collect.\n"
-    'Respond with ONLY a JSON object, no prose: {"action": "fetch", "connector": "<name>"} '
-    'or {"action": "enough"}.'
-) + UNTRUSTED_DATA_NOTICE
+
+def _build_planner_prompt(agentic_mode: bool) -> str:
+    """Build planner system prompt based on connector selection mode."""
+    base = (
+        "You are the evidence-gathering planner for a SOC incident investigation. "
+        "Given an incident and the evidence already collected, decide whether more "
+        "evidence is needed and, if so, which single connector to query next from "
+        "the remaining list. Two or three well-chosen items are normally enough to "
+        "explain root cause and impact - don't over-collect.\n"
+    )
+
+    if agentic_mode:
+        # Agentic mode: provide connector descriptions and comprehensive guidance
+        base += (
+            "\nAvailable connectors (confidence scores reflect data reliability):\n"
+            "- azure_monitor (0.95): Deployment logs, config changes, resource metrics, release history\n"
+            "- kubernetes (0.90): Pod logs, namespace events, container metrics, volume mounts\n"
+            "- github_commits (0.85): Code/config changes, deployment history, recent commits\n"
+            "- iam_logs (0.80): API calls, authentication events, access patterns, unusual volume\n\n"
+
+            "SIGNAL TYPE → CONNECTOR GUIDANCE:\n"
+            "Match connectors to the incident's signal type and context:\n\n"
+
+            "PublicStorageBucket:\n"
+            "  - azure_monitor: Config changes that exposed storage (highest priority)\n"
+            "  - github_commits: Terraform/IaC changes that modified ACLs\n"
+            "  - iam_logs: Access pattern spikes after exposure\n"
+            "  - kubernetes: Pod activity if storage mounted to containers\n\n"
+
+            "UnauthorizedAPICall:\n"
+            "  - iam_logs: Auth attempts, API call patterns (highest priority)\n"
+            "  - azure_monitor: Deployment/policy changes that granted access\n"
+            "  - github_commits: IAM policy or role changes in code\n"
+            "  - kubernetes: Service account activity if pods involved\n\n"
+
+            "LargeDataUpload:\n"
+            "  - kubernetes: Pod logs, volume writes (highest priority for container workloads)\n"
+            "  - azure_monitor: Volume config changes, mount events\n"
+            "  - iam_logs: API calls for data transfer after upload\n"
+            "  - github_commits: Training job or pipeline config changes\n\n"
+
+            "EVIDENCE DIVERSITY:\n"
+            "Prioritize different TYPES of evidence (mix deployment logs + runtime behavior + code changes + access patterns) "
+            "over similar sources. If timeline already shows kubernetes events, consider azure_monitor or github_commits next "
+            "to capture a different perspective. Avoid redundant evidence from the same layer.\n\n"
+
+            "CONTEXT-DRIVEN SELECTION:\n"
+            "Use incident details to refine choices:\n"
+            "  - API names: 'keyvault' or 'secrets' → iam_logs priority\n"
+            "  - Actor type 'service' + kubernetes source → kubernetes connector relevant\n"
+            "  - Blocked outcomes: May need less evidence (already mitigated)\n"
+            "  - High severity + success outcome: Prioritize deployment history (azure_monitor/github)\n\n"
+
+            "CONFIDENCE GUIDANCE:\n"
+            "Higher confidence sources (azure_monitor 0.95, kubernetes 0.90) are preferred when EQUALLY relevant. "
+            "However, choose lower confidence sources (github_commits 0.85, iam_logs 0.80) when they're MORE relevant "
+            "to the signal type - e.g., iam_logs (0.80) beats azure_monitor (0.95) for UnauthorizedAPICall root cause.\n\n"
+        )
+
+    base += (
+        'Respond with ONLY a JSON object, no prose: {"action": "fetch", "connector": "<name>"} '
+        'or {"action": "enough"}.'
+    )
+
+    return base + UNTRUSTED_DATA_NOTICE
 
 
 def _llm() -> ChatOpenAI:
@@ -55,6 +111,93 @@ def _llm() -> ChatOpenAI:
     )
 
 
+def _extract_relevant_details(signal_type: str, details: dict) -> dict:
+    """Extract signal-type-specific fields from details dict.
+
+    Filters details to include only fields relevant to connector selection,
+    avoiding noisy or irrelevant data.
+    """
+    if not details:
+        return {}
+
+    # Define relevant fields per signal type
+    relevant_fields = {
+        "PublicStorageBucket": ["bucket_acl", "public_network_access", "allow_blob_public_access"],
+        "UnauthorizedAPICall": ["caller", "api", "call_count_last_hour", "baseline_call_count_last_hour"],
+        "LargeDataUpload": ["size_gb", "file_name", "upload_rate_mbps"],
+    }
+
+    # Get relevant fields for this signal type, or all fields if unknown type
+    fields = relevant_fields.get(signal_type)
+    if fields is None:
+        return details  # Unknown signal type - include all details
+
+    return {k: v for k, v in details.items() if k in fields}
+
+
+def _summarize_timeline_sources(timeline: list) -> set[str]:
+    """Extract unique sources from timeline events.
+
+    Returns set of sources (e.g., {'kubernetes', 'azure_monitor'}) to help
+    LLM understand which evidence types are already represented.
+    """
+    if not timeline:
+        return set()
+
+    sources = set()
+    for event in timeline:
+        source = event.get("source")
+        if source:
+            sources.add(source)
+
+    return sources
+
+
+def _build_context_payload(
+    signal_type: str,
+    resource_name: str,
+    severity: str,
+    details: dict,
+    timeline: list,
+    evidence: list,
+    remaining_connectors: list[str]
+) -> str:
+    """Build context payload with incident details, timeline, and evidence collected.
+
+    Returns a structured string that will be wrapped in <untrusted_data> tags.
+    """
+    # Extract relevant details fields based on signal type
+    relevant_details = _extract_relevant_details(signal_type, details)
+
+    # Summarize timeline sources to encourage diversity
+    timeline_sources = _summarize_timeline_sources(timeline)
+
+    # Limit timeline to most recent 5 events to avoid token bloat
+    timeline_subset = timeline[-5:] if len(timeline) > 5 else timeline
+
+    payload = (
+        f"INCIDENT OVERVIEW:\n"
+        f"Signal Type: {signal_type}\n"
+        f"Resource: {resource_name}\n"
+        f"Severity: {severity}\n"
+    )
+
+    if relevant_details:
+        payload += f"\nINCIDENT DETAILS:\n{json.dumps(relevant_details, indent=2)}\n"
+
+    if timeline_subset:
+        payload += f"\nTIMELINE ({len(timeline_subset)} events):\n{json.dumps(timeline_subset, indent=2)}\n"
+        if timeline_sources:
+            payload += f"\nTimeline includes signals from: {', '.join(sorted(timeline_sources))}\n"
+
+    if evidence:
+        payload += f"\nEVIDENCE COLLECTED SO FAR ({len(evidence)} items):\n{json.dumps(evidence, indent=2)}\n"
+
+    payload += f"\nREMAINING CONNECTORS: {remaining_connectors}\n"
+
+    return payload
+
+
 def _plan_investigation(state: InvestigationState) -> dict:
     if not state["remaining_connectors"] or state["iteration"] >= MAX_ITERATIONS:
         return {"next_action": "enough", "next_connector": None}
@@ -64,16 +207,22 @@ def _plan_investigation(state: InvestigationState) -> dict:
             {"connector": e["connector"], "confidence": e["confidence"], "data": e["data"]}
             for e in state["evidence"]
         ]
-        user_msg = wrap_untrusted(
-            f"Incident: {state['signal_type']} on resource '{state['resource_name']}' "
-            f"(severity={state['severity']}).\n"
-            f"Evidence collected so far ({len(evidence_summary)} items): "
-            f"{json.dumps(evidence_summary)}\n"
-            f"Remaining connectors available: {state['remaining_connectors']}"
+
+        # Build context payload with incident details and timeline
+        context_payload = _build_context_payload(
+            signal_type=state["signal_type"],
+            resource_name=state["resource_name"],
+            severity=state["severity"],
+            details=state["details"],
+            timeline=state["timeline"],
+            evidence=evidence_summary,
+            remaining_connectors=state["remaining_connectors"]
         )
+        user_msg = wrap_untrusted(context_payload)
+
         response = _llm().invoke(
             [
-                {"role": "system", "content": PLANNER_SYSTEM},
+                {"role": "system", "content": _build_planner_prompt(state.get("agentic_mode", False))},
                 {"role": "user", "content": user_msg},
             ]
         )
@@ -116,7 +265,17 @@ def _route_after_check(state: InvestigationState) -> str:
 def _build_graph(shared: dict):
     def fetch_evidence(state: InvestigationState) -> dict:
         connector = state["next_connector"]
-        item = connectors.fetch(connector, state["resource_name"])
+
+        # Build context dict for scenario-aware evidence generation
+        context = {
+            "resource_name": state["resource_name"],
+            "signal_type": state["signal_type"],
+            "severity": state["severity"],
+            "details": state["details"],
+            "timeline": state["timeline"],
+        }
+
+        item = connectors.fetch(connector, context)
         # Stable per-incident id (ev1, ev2, ...) so the Day 4 Root Cause Agent
         # can cite specific evidence items in evidence_ids_cited.
         item["id"] = f"ev{len(state['evidence']) + 1}"
@@ -152,23 +311,36 @@ def _build_graph(shared: dict):
     return graph.compile()
 
 
-def run_investigation(incident_id: int, resource_name: str, signal_type: str, severity: str) -> dict:
+def run_investigation(
+    incident_id: int,
+    resource_name: str,
+    signal_type: str,
+    severity: str,
+    details: dict,
+    timeline: list,
+) -> dict:
     """Run the orchestrator for one incident. Always returns within ~90s."""
     shared: dict = {"evidence": [], "connectors_queried": []}
     compiled = _build_graph(shared)
+
+    # Read config to determine connector selection mode
+    agentic_mode = config.settings.use_agentic_connector_selection
 
     initial: InvestigationState = {
         "incident_id": incident_id,
         "resource_name": resource_name,
         "signal_type": signal_type,
         "severity": severity,
+        "details": details,
+        "timeline": timeline,
         "evidence": [],
         "connectors_queried": [],
-        "remaining_connectors": connectors.connector_order_for(signal_type),
+        "remaining_connectors": connectors.connector_order_for(signal_type, agentic=agentic_mode),
         "iteration": 0,
         "guard_triggered": False,
         "next_action": "",
         "next_connector": None,
+        "agentic_mode": agentic_mode,
     }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

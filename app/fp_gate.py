@@ -36,9 +36,34 @@ SOURCE_RELIABILITY_POINTS = {
 }
 DEFAULT_SOURCE_RELIABILITY_POINTS = 8
 
-# An unrecognized source can't be trusted to self-declare "critical". When no
-# recognized source corroborates the incident, severity points are capped here.
-UNTRUSTED_SEVERITY_CAP = 20
+# Actor trust: higher trust actors (system processes) are less suspicious than
+# anonymous actors or unknown identities
+ACTOR_TRUST_POINTS = {
+    "system": 10,  # Automated system processes highest trust
+    "service": 8,  # Service accounts second
+    "user": 5,  # Human users moderate trust baseline
+    "anonymous": 2,  # Anonymous actors highly suspicious
+    "other": 3,  # Unknown actor types low trust
+}
+
+# Outcome penalty: blocked/failed actions are less threatening than successful ones
+OUTCOME_ADJUSTMENTS = {
+    "success": 0,  # Successful = baseline threat
+    "partial": 5,  # Partial success = suspicious (permission failure mid-operation)
+    "failure": -5,  # Failed = attacker didn't succeed
+    "blocked": -10,  # Blocked by security control = noise, not breach
+}
+
+# Action risk multiplier: destructive actions boost score
+ACTION_RISK_WEIGHTS = {
+    "delete": 1.2,  # Destructive actions 20% boost
+    "execute": 1.2,
+    "create": 1.1,  # Mutating actions 10% boost
+    "update": 1.0,
+    "read": 0.9,  # Read-only slightly reduces score
+    "access": 1.0,
+    "other": 1.0,
+}
 
 MAX_ANOMALY_POINTS = 15
 
@@ -79,15 +104,10 @@ def _source_reliability_points(incident: Incident) -> int:
     )
 
 
-def _has_trusted_source(incident: Incident) -> bool:
-    return any(s in SOURCE_RELIABILITY_POINTS for s in _sources(incident))
+def _severity_points(incident: Incident) -> tuple[int, bool]:
+    """Returns (points, was_unrecognized).
 
-
-def _severity_points(incident: Incident) -> tuple[int, bool, bool]:
-    """Returns (points, was_unrecognized, was_capped).
-
-    Points are capped to UNTRUSTED_SEVERITY_CAP when no recognized source backs
-    the incident, so an unknown source can't self-escalate on severity alone.
+    All configured sources are trusted to report severity accurately.
     """
     severity = incident.severity
     unrecognized = severity not in SEVERITY_POINTS
@@ -101,11 +121,7 @@ def _severity_points(incident: Incident) -> tuple[int, bool, bool]:
         severity = DEFAULT_SEVERITY
 
     points = SEVERITY_POINTS[severity]
-    capped = False
-    if not _has_trusted_source(incident) and points > UNTRUSTED_SEVERITY_CAP:
-        points = UNTRUSTED_SEVERITY_CAP
-        capped = True
-    return points, unrecognized, capped
+    return points, unrecognized
 
 
 def _distinct_signal_types(incident: Incident) -> int:
@@ -213,13 +229,83 @@ def _count_without_baseline(incident: Incident) -> bool:
     return False
 
 
+def _actor_trust_points(incident: Incident) -> int:
+    """Best (most trusted) actor type across all timeline entries.
+
+    Returns the highest trust score found. If no actor data present, returns 0
+    (neither penalizes nor boosts the score).
+    """
+    best = 0
+    for entry in _timeline_entries(incident):
+        actor_data = entry.get("actor")
+        if not actor_data:
+            continue
+        actor_type = actor_data.get("type", "other")
+        best = max(best, ACTOR_TRUST_POINTS.get(actor_type, 0))
+    return best
+
+
+def _outcome_adjustment(incident: Incident) -> int:
+    """Worst (most suspicious) outcome across timeline.
+
+    Returns the outcome adjustment with highest absolute value. Negative values
+    reduce score (blocked/failed), positive increases (partial success).
+    """
+    worst_adj = 0
+    for entry in _timeline_entries(incident):
+        outcome = entry.get("outcome")
+        if not outcome:
+            continue
+        adj = OUTCOME_ADJUSTMENTS.get(outcome, 0)
+        if abs(adj) > abs(worst_adj):
+            worst_adj = adj
+    return worst_adj
+
+
+def _action_risk_multiplier(incident: Incident) -> float:
+    """Highest-risk action multiplier across timeline.
+
+    Returns the maximum risk weight found (1.0+ for destructive actions,
+    0.9 for read-only).
+    """
+    highest = 1.0
+    for entry in _timeline_entries(incident):
+        action = entry.get("action", "other")
+        highest = max(highest, ACTION_RISK_WEIGHTS.get(action, 1.0))
+    return highest
+
+
 def score_incident(incident: Incident) -> tuple[int, str]:
-    severity_pts, severity_unrecognized, severity_capped = _severity_points(incident)
+    """Score an incident 0-130 range (enhanced with actor/action/outcome).
+
+    Base scoring (0-115): severity + diversity + source + anomaly
+    Then: apply action risk multiplier to base (0.9x-1.2x)
+    Finally: add actor trust (+0-10) and outcome adjustment (-10 to +5)
+
+    Returns (score, reason) where reason is the full arithmetic breakdown.
+    """
+    # Existing factors (unchanged calculation)
+    severity_pts, severity_unrecognized = _severity_points(incident)
     diversity_pts = _diversity_points(incident)
     source_pts = _source_reliability_points(incident)
     anomaly_pts = _anomaly_points(incident)
-    score = severity_pts + diversity_pts + source_pts + anomaly_pts
 
+    base_score = severity_pts + diversity_pts + source_pts + anomaly_pts
+
+    # NEW: Actor/outcome/action factors
+    actor_pts = _actor_trust_points(incident)
+    outcome_adj = _outcome_adjustment(incident)
+    action_mult = _action_risk_multiplier(incident)
+
+    # Final score: apply multiplier to base, then add adjustments
+    # This keeps scores in a more reasonable range (0-130ish)
+    score_with_multiplier = int(base_score * action_mult)
+    score = score_with_multiplier + actor_pts + outcome_adj
+
+    # Clamp to reasonable range (min 0)
+    score = max(0, score)
+
+    # Decision thresholds unchanged
     if score < PARKED_MAX:
         decision = "parked"
     elif score <= QUEUED_MAX:
@@ -230,14 +316,16 @@ def score_incident(incident: Incident) -> tuple[int, str]:
     sev_note = ""
     if severity_unrecognized:
         sev_note += f", unrecognized->treated as {DEFAULT_SEVERITY}"
-    if severity_capped:
-        sev_note += f", capped@{UNTRUSTED_SEVERITY_CAP} untrusted-source"
 
+    # Enhanced reason string includes new factors
     reason = (
-        f"severity={incident.severity}({severity_pts}{sev_note}) + "
-        f"diversity={_distinct_signal_types(incident)}type({diversity_pts}) + "
-        f"source_reliability({source_pts}) + "
-        f"anomaly({anomaly_pts}) = {score} -> {decision}"
+        f"[severity({severity_pts}{sev_note}) + "
+        f"diversity({diversity_pts}) + "
+        f"source({source_pts}) + "
+        f"anomaly({anomaly_pts})] * "
+        f"action_risk({action_mult:.1f}) + "
+        f"actor_trust({actor_pts}) + "
+        f"outcome_adj({outcome_adj}) = {score} → {decision}"
     )
     return score, reason
 
@@ -249,13 +337,20 @@ def build_explanation(incident: Incident) -> str:
     (an LLM paraphrase could embellish; this cannot) and costs nothing, keeping
     the zero-LLM-spend-on-gated-incidents property intact.
     """
-    severity_pts, severity_unrecognized, severity_capped = _severity_points(incident)
+    severity_pts, severity_unrecognized = _severity_points(incident)
     diversity_pts = _diversity_points(incident)
     source_pts = _source_reliability_points(incident)
     anomaly_pts = _anomaly_points(incident)
-    score = severity_pts + diversity_pts + source_pts + anomaly_pts
+    base_score = severity_pts + diversity_pts + source_pts + anomaly_pts
     n_types = _distinct_signal_types(incident)
-    trusted = _has_trusted_source(incident)
+    sources = _sources(incident)
+    has_known_source = any(s in SOURCE_RELIABILITY_POINTS for s in sources)
+
+    # NEW: Actor/action/outcome factors (matching score_incident formula)
+    actor_pts = _actor_trust_points(incident)
+    outcome_adj = _outcome_adjustment(incident)
+    action_mult = _action_risk_multiplier(incident)
+    score = int(round(base_score * action_mult)) + actor_pts + outcome_adj
 
     # Derive the gate decision from the score, not incident.status — by the
     # time this renders, the lifecycle may have moved on (analyzing/analyzed).
@@ -286,19 +381,12 @@ def build_explanation(incident: Incident) -> str:
             f"threshold, and was handed to the automated investigation pipeline."
         )
 
-    # 2. Severity — including the trust cap and unrecognized-value rules.
+    # 2. Severity.
     if severity_unrecognized:
         parts.append(
             f"Its reported severity '{incident.severity}' is not a recognized level, "
             f"so it was scored as '{DEFAULT_SEVERITY}' ({severity_pts} pts) rather "
             f"than being ignored."
-        )
-    elif severity_capped:
-        parts.append(
-            f"It is reported as '{incident.severity}', but no recognized monitoring "
-            f"source backs that claim, so severity credit was capped at "
-            f"{UNTRUSTED_SEVERITY_CAP} pts — an unrecognized source cannot "
-            f"self-declare {incident.severity}."
         )
     else:
         parts.append(f"Severity '{incident.severity}' contributed {severity_pts} pts.")
@@ -315,16 +403,15 @@ def build_explanation(incident: Incident) -> str:
             f"each other ({diversity_pts} pts)."
         )
 
-    # 4. Source trust.
-    if trusted:
+    # 4. Source reliability.
+    if has_known_source:
         parts.append(
-            f"The most reliable reporting source is a recognized connector "
-            f"({source_pts} pts)."
+            f"The most reliable reporting source contributed {source_pts} pts."
         )
     else:
         parts.append(
-            f"The reporting source '{incident.source}' is not in the recognized "
-            f"source list, so it received the default low trust score ({source_pts} pts)."
+            f"The reporting source '{incident.source}' is not in the high-reliability "
+            f"source list, so it received the default score ({source_pts} pts)."
         )
 
     # 5. Anomaly rules — which fired, or why none did.
@@ -338,6 +425,21 @@ def build_explanation(incident: Incident) -> str:
         )
     else:
         parts.append("Nothing in the signal details matched an anomaly rule (0 pts).")
+
+    # 5a. Action risk multiplier (if not 1.0)
+    if action_mult != 1.0:
+        parts.append(
+            f"Action risk multiplier: {action_mult:.1f}× "
+            f"(base score {base_score} → {int(round(base_score * action_mult))})."
+        )
+
+    # 5b. Actor trust adjustment (if non-zero)
+    if actor_pts != 0:
+        parts.append(f"Actor trust contributed {actor_pts:+d} pts.")
+
+    # 5c. Outcome adjustment (if non-zero)
+    if outcome_adj != 0:
+        parts.append(f"Outcome adjustment contributed {outcome_adj:+d} pts.")
 
     # 6. What happens next.
     if decision == "parked":

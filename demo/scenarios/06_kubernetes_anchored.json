@@ -9,14 +9,32 @@
       "resource_name": "ml-training-cluster",
       "severity": "high",
       "source": "kubernetes",
-      "details": {"size_gb": 8.7, "file_name": "training_batch_042.parquet"}
+      "details": {"size_gb": 8.7, "file_name": "training_batch_042.parquet"},
+      "actor": {
+        "type": "service",
+        "id": "svc-ml-trainer",
+        "ip_address": "10.1.5.67"
+      },
+      "action": "create",
+      "outcome": "success",
+      "event_time": "2026-08-18T15:20:00Z",
+      "summary": "ML training service uploaded 8.7GB training batch to cluster storage — above baseline, could indicate legitimate model training or data staging for exfiltration."
     },
     {
       "signal_type": "UnauthorizedAPICall",
       "resource_name": "ml-training-cluster",
       "severity": "critical",
       "source": "iam_logs",
-      "details": {"caller": "svc-ml-pipeline", "api": "azure.storage.blob.download"}
+      "details": {"caller": "svc-ml-pipeline", "api": "azure.storage.blob.download"},
+      "actor": {
+        "type": "service",
+        "id": "svc-ml-pipeline",
+        "ip_address": "10.1.5.89"
+      },
+      "action": "read",
+      "outcome": "success",
+      "event_time": "2026-08-18T15:22:30Z",
+      "summary": "ML pipeline service accessed blob download API on training cluster — follows large upload, pattern consistent with data staging then retrieval for exfiltration."
     }
   ]
 }

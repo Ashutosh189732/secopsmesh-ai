@@ -88,6 +88,13 @@ class Incident(Base):
     # correlated signal bumps correlated_count and re-triggers exactly one run.
     analyzed_at_count: Mapped[int | None] = mapped_column(Integer, default=None)
 
+    # Timestamp when a human operator manually triggered investigation for a
+    # parked/queued incident, overriding the FP gate decision. Null for incidents
+    # that auto-escalated or were never manually triggered.
+    manually_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

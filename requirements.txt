@@ -10,6 +10,11 @@ python-dotenv>=1.0
 # Anthropic's API directly.
 openai>=1.50
 
+# Azure OpenAI integration (optional) — Only needed if LLM_PROVIDER=azure
+# Required for Azure AD authentication (DefaultAzureCredential, ClientSecretCredential).
+# If using AZURE_OPENAI_API_KEY only, this package is not required.
+azure-identity>=1.15
+
 # Day 3 — LangGraph orchestrator + langchain-openai give us stateful
 # cycles/conditional edges and a chat-model wrapper we can still point at
 # OpenRouter's base_url (not openai.com or Anthropic directly).

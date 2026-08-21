@@ -1,7 +1,7 @@
 {
   "name": "01_parked",
-  "description": "Single low-severity signal from an unrecognized source. The FP gate should stop it before any LLM call runs.",
-  "expected_outcome": "score = 5 (low) + 10 (1 type) + 8 (unknown source) + 0 (anomaly) = 23 -> parked",
+  "description": "Single low-severity signal from an unrecognized source with blocked outcome. The FP gate should stop it before any LLM call runs.",
+  "expected_outcome": "score reduced by blocked outcome (-10) -> parked",
   "delay_seconds_between_signals": 0,
   "signals": [
     {
@@ -9,7 +9,16 @@
       "resource_name": "dev-sandbox-worker-03",
       "severity": "low",
       "source": "endpoint_agent",
-      "details": {"caller": "test-runner", "api": "internal.healthcheck", "note": "likely CI noise"}
+      "details": {"caller": "test-runner", "api": "internal.healthcheck", "note": "likely CI noise"},
+      "actor": {
+        "type": "service",
+        "id": "ci-test-runner-svc",
+        "ip_address": "192.168.1.100"
+      },
+      "action": "read",
+      "outcome": "blocked",
+      "event_time": "2026-08-18T09:05:12Z",
+      "summary": "CI service account ci-test-runner-svc attempted to access internal healthcheck endpoint from dev sandbox — request was blocked, likely automated test noise with no security impact."
     }
   ]
 }

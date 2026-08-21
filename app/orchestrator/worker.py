@@ -72,6 +72,8 @@ def _process(incident_id: int) -> None:
             resource_name=incident.resource_name,
             signal_type=incident.signal_type,
             severity=incident.severity,
+            details=incident.details,
+            timeline=incident.timeline,
         )
 
         incident.evidence = result["evidence"]

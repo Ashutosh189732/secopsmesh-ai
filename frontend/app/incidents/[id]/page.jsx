@@ -2,8 +2,18 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { explainIncident, fetchIncident, reportUrl } from "../../../lib/api";
-import { severityClasses, statusClasses, priorityClasses } from "../../../lib/badges";
+import { explainIncident, fetchIncident, reportUrl, triggerInvestigation } from "../../../lib/api";
+import {
+  severityClasses,
+  statusClasses,
+  priorityClasses,
+  actorTypeClasses,
+  actionClasses,
+  outcomeClasses,
+  actorIcon,
+  outcomeIcon,
+  severityDotClasses
+} from "../../../lib/badges";
 
 const POLL_MS = 5000;
 const TABS = ["Timeline", "Evidence", "Policies", "Root Cause", "Risk", "Remediation"];
@@ -90,6 +100,9 @@ export default function IncidentDetailPage({ params }) {
       {/* FP Gate decision, shown prominently per the plan */}
       <FpGateCard incident={incident} />
 
+      {/* Manual investigation trigger for parked/queued incidents */}
+      <ManualTriggerCard incident={incident} />
+
       <div className="mt-6 border-b border-gray-200">
         <nav className="-mb-px flex gap-6">
           {TABS.map((tab) => (
@@ -118,6 +131,52 @@ export default function IncidentDetailPage({ params }) {
           <RemediationTab incident={incident} approved={approved} setApproved={setApproved} />
         )}
       </div>
+    </div>
+  );
+}
+
+function ManualTriggerCard({ incident }) {
+  const [triggering, setTriggering] = useState(false);
+  const [triggerError, setTriggerError] = useState(null);
+
+  // Only show for parked/queued incidents
+  const canTrigger = ["parked", "queued"].includes(incident.status);
+  if (!canTrigger) return null;
+
+  async function handleTrigger() {
+    setTriggering(true);
+    setTriggerError(null);
+    try {
+      await triggerInvestigation(incident.id);
+      // Poll will pick up status change automatically
+    } catch (err) {
+      setTriggerError(err.message);
+    } finally {
+      setTriggering(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded border border-amber-200 bg-amber-50 px-4 py-3">
+      <div className="text-sm font-semibold text-amber-900">
+        Manual Investigation Override
+      </div>
+      <p className="mt-1 text-sm text-amber-800">
+        This incident was {incident.status} by the FP gate. You can override
+        this decision and trigger a full LLM investigation.
+      </p>
+      <button
+        onClick={handleTrigger}
+        disabled={triggering}
+        className="mt-3 rounded bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+      >
+        {triggering ? "Triggering investigation..." : "🔍 Investigate Now"}
+      </button>
+      {triggerError && (
+        <div className="mt-2 text-xs text-red-600">
+          Could not trigger: {triggerError}
+        </div>
+      )}
     </div>
   );
 }
@@ -199,25 +258,300 @@ function EmptyState({ text }) {
 
 function TimelineTab({ incident }) {
   if (!incident.timeline?.length) return <EmptyState text="No timeline events yet." />;
+
+  // Helper: Calculate time gap between events in seconds
+  function calculateTimeGap(prevTimestamp, currentTimestamp) {
+    const prev = new Date(prevTimestamp);
+    const curr = new Date(currentTimestamp);
+    return Math.floor((curr - prev) / 1000);
+  }
+
+  // Helper: Format duration as human-readable string
+  function formatDuration(seconds) {
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  // Helper: Detect anomalies from event details
+  function detectAnomalies(details) {
+    if (!details || typeof details !== "object") return [];
+    const anomalies = [];
+
+    if (details.bucket_acl === "public-read") {
+      anomalies.push({ key: "public-bucket", description: "Public storage" });
+    }
+
+    if (details.size_gb && details.size_gb >= 1.0) {
+      anomalies.push({ key: "large-upload", description: `${details.size_gb} GB upload` });
+    }
+
+    // Call volume anomaly - matches backend fp_gate.py lines 186-195
+    const callCount = details.call_count_last_hour;
+    const baseline = details.baseline_call_count_last_hour;
+    if (callCount != null && baseline != null && callCount > baseline * 3) {
+      const ratio = Math.round(callCount / baseline);
+      anomalies.push({ key: "call-volume", description: `${ratio}× baseline calls` });
+    }
+
+    return anomalies;
+  }
+
+  // Helper: Calculate approximate FP contribution up to this signal
+  // Note: This is a simplified display calculation. Actual scoring in fp_gate.py
+  function calculateFPContribution(event, index, timeline, incidentSeverity) {
+    const SEVERITY_PTS = { critical: 40, high: 30, medium: 15, low: 5 };
+    const SOURCE_PTS = {
+      azure_monitor: 20, kubernetes: 18, github_commits: 16, iam_logs: 14,
+      waf_alert: 8, endpoint_agent: 8, vuln_scanner: 5
+    };
+    const ACTOR_TRUST = { system: 10, service: 8, user: 5, anonymous: 2, other: 3 };
+    const ACTION_RISK = { delete: 1.2, execute: 1.2, create: 1.1, update: 1.0, read: 0.9, access: 1.0, other: 1.0 };
+    const OUTCOME_ADJ = { success: 0, partial: 5, failure: -5, blocked: -10 };
+
+    // Backend takes worst severity across all signals (stored in incident.severity)
+    // which may escalate as signals arrive
+    const signalsUpToNow = timeline.slice(0, index + 1);
+
+    // Severity: Use incident severity (escalates to worst across all signals)
+    const severityPts = SEVERITY_PTS[incidentSeverity?.toLowerCase()] || 15;
+
+    // Diversity: Count distinct signal types up to now (10 + 15 per additional type)
+    const uniqueTypes = new Set(signalsUpToNow.map(e => e.signal)).size;
+    const diversityPts = uniqueTypes === 1 ? 10 : 10 + (uniqueTypes - 1) * 15;
+
+    // Source: Best (highest trust) source up to now
+    const sourcePts = Math.max(...signalsUpToNow.map(e => SOURCE_PTS[e.source] || 8));
+
+    // Anomaly: Max anomaly points across all signals up to now
+    const anomalyPts = Math.max(...signalsUpToNow.map(e => {
+      let pts = 0;
+
+      // Public bucket = 10 pts
+      if (e.details?.bucket_acl === "public-read") {
+        pts = Math.max(pts, 10);
+      }
+
+      // Large upload (>=1GB) = 5 pts
+      if (e.details?.size_gb >= 1.0) {
+        pts = Math.max(pts, 5);
+      }
+
+      // Call volume anomaly - matches fp_gate.py lines 186-195
+      const callCount = e.details?.call_count_last_hour;
+      const baseline = e.details?.baseline_call_count_last_hour;
+      if (callCount != null && baseline != null && callCount > 0) {
+        const ratio = callCount / Math.max(baseline, 1.0);
+        const volumePts = Math.min(15, Math.floor(ratio));  // ratio->int, cap at 15
+        pts = Math.max(pts, volumePts);
+      }
+
+      return Math.min(15, pts); // Overall anomaly cap at 15
+    }), 0);
+
+    // Base score (before multipliers/adjustments)
+    const baseScore = severityPts + diversityPts + sourcePts + anomalyPts;
+
+    // Action risk: Highest risk multiplier up to now
+    const actionMult = Math.max(...signalsUpToNow.map(e => ACTION_RISK[e.action] || 1.0));
+
+    // Actor trust: Best (highest trust) actor up to now
+    const actorPts = Math.max(...signalsUpToNow.map(e =>
+      e.actor ? (ACTOR_TRUST[e.actor.type] || 0) : 0
+    ), 0);
+
+    // Outcome adjustment: Worst (most suspicious = closest to 0 or positive)
+    const outcomeAdj = signalsUpToNow.reduce((worst, e) => {
+      const adj = OUTCOME_ADJ[e.outcome] || 0;
+      return Math.abs(adj) > Math.abs(worst) ? adj : worst;
+    }, 0);
+
+    // Final score formula (matches fp_gate.py):
+    // (base * action_mult) + actor + outcome
+    const cumulativeScore = Math.max(0, Math.floor(baseScore * actionMult) + actorPts + outcomeAdj);
+
+    // Calculate previous score for delta
+    let prevScore = 0;
+    if (index > 0) {
+      const prevSignals = timeline.slice(0, index);
+      const prevUnique = new Set(prevSignals.map(e => e.signal)).size;
+      const prevDiversity = prevUnique === 1 ? 10 : 10 + (prevUnique - 1) * 15;
+      const prevSource = Math.max(...prevSignals.map(e => SOURCE_PTS[e.source] || 8));
+      const prevAnomaly = Math.max(...prevSignals.map(e => {
+        let pts = 0;
+        if (e.details?.bucket_acl === "public-read") pts = Math.max(pts, 10);
+        if (e.details?.size_gb >= 1.0) pts = Math.max(pts, 5);
+        return Math.min(15, pts);
+      }), 0);
+      const prevBase = severityPts + prevDiversity + prevSource + prevAnomaly;
+      const prevAction = Math.max(...prevSignals.map(e => ACTION_RISK[e.action] || 1.0));
+      const prevActor = Math.max(...prevSignals.map(e =>
+        e.actor ? (ACTOR_TRUST[e.actor.type] || 0) : 0
+      ), 0);
+      const prevOutcome = prevSignals.reduce((worst, e) => {
+        const adj = OUTCOME_ADJ[e.outcome] || 0;
+        return Math.abs(adj) > Math.abs(worst) ? adj : worst;
+      }, 0);
+      prevScore = Math.max(0, Math.floor(prevBase * prevAction) + prevActor + prevOutcome);
+    }
+
+    const delta = cumulativeScore - prevScore;
+
+    // Threshold detection
+    let crossedThreshold = false;
+    let newStatus = null;
+    if (prevScore <= 80 && cumulativeScore > 80) {
+      crossedThreshold = true;
+      newStatus = "investigating";
+    } else if (prevScore < 40 && cumulativeScore >= 40) {
+      crossedThreshold = true;
+      newStatus = "queued";
+    }
+
+    return { delta, cumulativeScore, crossedThreshold, newStatus };
+  }
+
   return (
-    <ol className="space-y-3">
-      {incident.timeline.map((event, i) => (
-        <li key={i} className="rounded border border-gray-200 bg-white px-4 py-3">
-          <div className="text-xs text-gray-400">{event.timestamp}</div>
-          <div className="text-sm font-medium text-gray-800">{event.signal}</div>
-          <div className="text-xs text-gray-500">source: {event.source}</div>
-          {event.details && Object.keys(event.details).length > 0 && (
-            <div className="mt-1 text-xs text-gray-500">
-              {Object.entries(event.details).map(([k, v]) => (
-                <span key={k} className="mr-3 whitespace-nowrap">
-                  <span className="text-gray-400">{k}:</span> {String(v)}
-                </span>
-              ))}
+    <div className="relative pl-12">
+      {/* Vertical connecting line */}
+      <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200" />
+
+      {incident.timeline.map((event, i) => {
+        const gap = i > 0 ? calculateTimeGap(incident.timeline[i-1].timestamp, event.timestamp) : null;
+        const fpContribution = calculateFPContribution(event, i, incident.timeline, incident.severity);
+        const anomalies = detectAnomalies(event.details);
+
+        return (
+          <div key={i}>
+            {/* Time gap indicator (if gap > 60 seconds) */}
+            {gap && gap > 60 && (
+              <div className="relative mb-3">
+                <div className="ml-8 py-2 text-xs text-gray-400 flex items-center gap-2">
+                  <span>⏸</span>
+                  <span>{formatDuration(gap)} gap</span>
+                </div>
+              </div>
+            )}
+
+            {/* Timeline event */}
+            <div className="relative mb-6">
+              {/* Timeline dot - sized by incident severity (escalates as signals arrive) */}
+              <div className={`absolute left-[-2rem] top-3 z-10 rounded-full border-4 border-white shadow ${severityDotClasses(incident.severity || "medium")}`} />
+
+              {/* Event card */}
+              <div className="rounded border border-gray-200 bg-white px-4 py-3 shadow-sm">
+                {/* AI Summary (existing) */}
+                {event.summary && (
+                  <div className="mb-3 rounded-md bg-violet-50 px-3 py-2 text-sm leading-relaxed text-gray-800">
+                    <span className="mr-1 text-violet-600">✨</span>
+                    {event.summary}
+                  </div>
+                )}
+
+                {/* NEW: Badges row - correlation + anomalies */}
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {i > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700 border border-blue-200"
+                      title="Same resource within 10-minute correlation window"
+                    >
+                      🔗 Correlated
+                    </span>
+                  )}
+                  {anomalies.map(anomaly => (
+                    <span
+                      key={anomaly.key}
+                      className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800 border border-amber-200"
+                    >
+                      ⚠️ {anomaly.description}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Actor row (existing) */}
+                {event.actor && (
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="text-lg">{actorIcon(event.actor.type)}</span>
+                    <span className="text-sm font-semibold text-gray-900">
+                      {event.actor.id || "Unknown"}
+                    </span>
+                    {event.actor.ip_address && (
+                      <span className="text-xs text-gray-400">
+                        ({event.actor.ip_address})
+                      </span>
+                    )}
+                    <span className={`ml-auto rounded-full border px-2 py-0.5 text-xs font-medium ${actorTypeClasses(event.actor.type)}`}>
+                      {event.actor.type}
+                    </span>
+                  </div>
+                )}
+
+                {/* Action + Signal + Outcome (existing) */}
+                <div className="flex items-center gap-2">
+                  {event.action && (
+                    <span className={`rounded border px-2 py-0.5 text-xs font-medium uppercase ${actionClasses(event.action)}`}>
+                      {event.action}
+                    </span>
+                  )}
+                  <span className="text-sm font-medium text-gray-800">{event.signal}</span>
+                  {event.outcome && (
+                    <span className={`ml-auto rounded border px-2 py-0.5 text-xs font-semibold ${outcomeClasses(event.outcome)}`}>
+                      {outcomeIcon(event.outcome)} {event.outcome.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+
+                {/* NEW: FP Score contribution */}
+                <div className="mt-2 text-xs">
+                  <span className="text-gray-500">FP Impact: </span>
+                  <span className={fpContribution.crossedThreshold ? "font-bold text-green-600" : "text-gray-700"}>
+                    {fpContribution.delta > 0 ? `+${fpContribution.delta}` : fpContribution.delta} pts → Score: {fpContribution.cumulativeScore}
+                  </span>
+                  {fpContribution.crossedThreshold && (
+                    <span className="ml-2 font-semibold text-green-700">
+                      ⬆️ Escalated to {fpContribution.newStatus}
+                    </span>
+                  )}
+                </div>
+
+                {/* Timestamps (existing) */}
+                <div className="mt-2 flex flex-wrap gap-3 text-xs text-gray-400">
+                  {event.event_time && (
+                    <span title="When the event actually occurred">
+                      ⏱ Event: {new Date(event.event_time).toLocaleString()}
+                    </span>
+                  )}
+                  <span title="When we received the signal">
+                    📥 Received: {new Date(event.timestamp).toLocaleString()}
+                  </span>
+                  <span className="text-gray-500">Source: {event.source}</span>
+                </div>
+
+                {/* Technical details (existing) */}
+                {event.details && Object.keys(event.details).filter(k => k !== "summary").length > 0 && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                      Technical details
+                    </summary>
+                    <div className="mt-1 text-xs text-gray-500">
+                      {Object.entries(event.details)
+                        .filter(([k]) => k !== "summary")
+                        .map(([k, v]) => (
+                          <span key={k} className="mr-3 whitespace-nowrap">
+                            <strong>{k}:</strong> {JSON.stringify(v)}
+                          </span>
+                        ))}
+                    </div>
+                  </details>
+                )}
+              </div>
             </div>
-          )}
-        </li>
-      ))}
-    </ol>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

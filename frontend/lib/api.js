@@ -62,3 +62,24 @@ export async function explainIncident(id) {
   }
   return res.json();
 }
+
+// Manually trigger investigation for a parked/queued incident, overriding the
+// FP gate decision. Allows operators to escalate incidents the deterministic
+// gate scored below the investigating threshold.
+export async function triggerInvestigation(id) {
+  const res = await fetch(`${API_BASE}/api/incidents/${id}/investigate`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    let detail = `POST /api/incidents/${id}/investigate failed: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}

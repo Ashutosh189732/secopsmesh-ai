@@ -1,7 +1,7 @@
 {
   "name": "02_queued",
   "description": "Single high-severity signal, one mid-trust source. Flagged but not yet worth a full investigation.",
-  "expected_outcome": "score = 30 (high) + 10 (1 type) + 14 (iam_logs) + 0 (anomaly: call_count present but no baseline) = 54 -> queued",
+  "expected_outcome": "enhanced with actor data -> queued",
   "delay_seconds_between_signals": 0,
   "signals": [
     {
@@ -9,7 +9,16 @@
       "resource_name": "billing-service-prod",
       "severity": "high",
       "source": "iam_logs",
-      "details": {"caller": "svc-reporting", "api": "azure.keyvault.secrets.get", "call_count_last_hour": 12}
+      "details": {"caller": "svc-reporting", "api": "azure.keyvault.secrets.get", "call_count_last_hour": 12},
+      "actor": {
+        "type": "service",
+        "id": "svc-reporting",
+        "ip_address": "10.0.2.45"
+      },
+      "action": "read",
+      "outcome": "success",
+      "event_time": "2026-08-18T11:22:33Z",
+      "summary": "Service account svc-reporting accessed Key Vault secrets 12 times from internal network — above typical baseline, potentially misconfigured automation or credential enumeration."
     }
   ]
 }

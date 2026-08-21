@@ -10,14 +10,32 @@
       "resource_name": "payments-vault-prod",
       "severity": "high",
       "source": "iam_logs",
-      "details": {"caller": "svc-backup", "api": "azure.keyvault.secrets.list", "call_count_last_hour": 31, "baseline_call_count_last_hour": 3}
+      "details": {"caller": "svc-backup", "api": "azure.keyvault.secrets.list", "call_count_last_hour": 31, "baseline_call_count_last_hour": 3},
+      "actor": {
+        "type": "service",
+        "id": "svc-backup",
+        "ip_address": "10.0.7.22"
+      },
+      "action": "read",
+      "outcome": "success",
+      "event_time": "2026-08-18T17:00:00Z",
+      "summary": "Backup service svc-backup enumerated Key Vault secrets 31 times in one hour — 10× above baseline of 3 calls, indicates credential harvesting or compromised backup account."
     },
     {
       "signal_type": "PublicStorageBucket",
       "resource_name": "payments-vault-prod",
       "severity": "critical",
       "source": "azure_monitor",
-      "details": {"bucket_acl": "public-read"}
+      "details": {"bucket_acl": "public-read"},
+      "actor": {
+        "type": "user",
+        "id": "contractor@external.com",
+        "ip_address": "203.0.113.199"
+      },
+      "action": "update",
+      "outcome": "success",
+      "event_time": "2026-08-18T17:05:30Z",
+      "summary": "External contractor exposed payments vault storage to public internet — follows suspicious backup service enumeration, critical escalation indicating coordinated attack or insider threat."
     }
   ]
 }

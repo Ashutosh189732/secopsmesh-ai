@@ -1,7 +1,7 @@
 {
   "name": "07_noise_batch",
   "description": "Three independent low-signal alerts on three different resources - none share a resource_name, so none correlate with each other. Demonstrates that the incident list shows three distinct parked incidents rather than one merged incident, contrasting with scenarios 3-6 where same-resource signals fold together.",
-  "expected_outcome": "all three score below 40 and land as separate parked incidents: 23, 33 (public-read bucket anomaly), and 33.",
+  "expected_outcome": "all three score below 40 and land as separate parked incidents: 20 (anonymous actor +2), 36 (public-read anomaly +10, other actor +3), 36 (create action 1.1x, other actor +3).",
   "delay_seconds_between_signals": 1,
   "signals": [
     {
@@ -9,21 +9,48 @@
       "resource_name": "test-vm-042",
       "severity": "low",
       "source": "vuln_scanner",
-      "details": {"caller": "unknown", "api": "ssh.login.attempt"}
+      "details": {"caller": "unknown", "api": "ssh.login.attempt"},
+      "actor": {
+        "type": "anonymous",
+        "id": null,
+        "ip_address": "198.51.100.23"
+      },
+      "action": "access",
+      "outcome": "failure",
+      "event_time": "2026-08-18T16:10:00Z",
+      "summary": "Anonymous actor from 198.51.100.23 attempted SSH login to test VM — login failed, likely automated scanner or benign internet noise against non-production resource."
     },
     {
       "signal_type": "PublicStorageBucket",
       "resource_name": "staging-api-01",
       "severity": "low",
       "source": "waf_alert",
-      "details": {"bucket_acl": "public-read", "note": "known staging bucket, expected public"}
+      "details": {"bucket_acl": "public-read", "note": "known staging bucket, expected public"},
+      "actor": {
+        "type": "other",
+        "id": "terraform-apply-automation",
+        "ip_address": "10.0.1.5"
+      },
+      "action": "update",
+      "outcome": "success",
+      "event_time": "2026-08-18T16:11:00Z",
+      "summary": "Terraform automation set staging API bucket to public-read — expected configuration for publicly accessible staging environment, no security concern."
     },
     {
       "signal_type": "LargeDataUpload",
       "resource_name": "qa-cluster-7",
       "severity": "medium",
       "source": "endpoint_agent",
-      "details": {"size_gb": 0.2, "file_name": "test_fixture.csv"}
+      "details": {"size_gb": 0.2, "file_name": "test_fixture.csv"},
+      "actor": {
+        "type": "other",
+        "id": "svc-qa-runner",
+        "ip_address": "10.2.3.44"
+      },
+      "action": "create",
+      "outcome": "success",
+      "event_time": "2026-08-18T16:12:00Z",
+      "summary": "QA automation service uploaded 200MB test fixture to QA cluster — routine test data setup, well below anomaly threshold for non-production environment."
     }
   ]
 }
